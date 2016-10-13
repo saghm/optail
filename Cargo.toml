@@ -5,3 +5,8 @@ name = "optail"
 version = "0.1.0"
 
 [dependencies]
+bson = "0.3.1"
+colored = "1.3.0"
+docopt = "0.6.86"
+mongodb = "0.1.7"
+rustc-serialize = "0.3.19"
