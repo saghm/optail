@@ -26,7 +26,7 @@ Usage:
 
 Options:
     -h --help      Show this screen.
-    -v --version      Show version.
+    -v --version   Show version.
     --host=<host>  Host to connect to [default: localhost].
     --port=<port>  Port to connect to [default: 27017].
 ";
