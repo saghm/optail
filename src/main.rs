@@ -20,7 +20,7 @@ const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
 const USAGE: &'static str = "
 Usage:
-    optail [--host=<host>] [--port=<port>]
+    optail [--host=<host>] [--port=<port>] [--debug]
     optail (-h | --help)
     optail (-v | --version)
 
@@ -29,6 +29,7 @@ Options:
     -v --version   Show version.
     --host=<host>  Host to connect to [default: localhost].
     --port=<port>  Port to connect to [default: 27017].
+    --debug        Print debug information.
 ";
 
 #[derive(Debug, RustcDecodable)]
@@ -36,6 +37,7 @@ struct Args {
     flag_host: String,
     flag_port: u16,
     flag_version: bool,
+    flag_debug: bool,
 }
 
 fn colorize(input: String) -> String {
@@ -44,6 +46,23 @@ fn colorize(input: String) -> String {
     let colon = format!("{}", ":".blue());
 
     input.replace("{", &open_br).replace("}", &close_br).replace(":", &colon)
+}
+
+macro_rules! fail {
+    ($out:expr, $err:expr, $debug:expr) => {{
+        if $debug {
+            writeln!($out, "{}: {}", "optail error".red(), $err).unwrap();
+        }
+
+        return;
+    }}
+}
+
+macro_rules! get_or_fail {
+    ($exp:expr, $out:expr, $debug:expr) => { match $exp {
+        Ok(val) => val,
+        Err(e) => fail!($out, e, $debug),
+    }}
 }
 
 fn main() {
@@ -58,13 +77,9 @@ fn main() {
 
     let mut stderr = io::stderr();
 
-    let client = match Client::connect(&args.flag_host, args.flag_port) {
-        Ok(c) => c,
-        Err(e) => {
-            writeln!(stderr, "{}", e).unwrap();
-            return;
-        }
-    };
+    let client = get_or_fail!(Client::connect(&args.flag_host, args.flag_port),
+                              stderr,
+                              args.flag_debug);
 
     let second = Duration::from_secs(1);
 
@@ -79,10 +94,7 @@ fn main() {
             last_entry.get("ts").unwrap().clone()
         }
         Ok(_) => Bson::I32(0),
-        Err(e) => {
-            writeln!(stderr, "{}", e).unwrap();
-            return;
-        }
+        Err(e) => fail!(stderr, e, args.flag_debug),
     };
 
     let mut options = FindOptions::new();
@@ -94,23 +106,15 @@ fn main() {
         "ts" => { "$gt" => timestamp }
     };
 
-    let mut cursor = match oplog.find(Some(filter), Some(options)) {
-        Ok(c) => c,
-        Err(e) => {
-            writeln!(stderr, "{}", e).unwrap();
-            return;
-        }
-    };
-
+    let mut cursor = get_or_fail!(oplog.find(Some(filter), Some(options)), stderr, args.flag_debug);
+   
     loop {
         while let Some(doc_result) = cursor.next() {
-            let doc = match doc_result {
-                Ok(d) => d,
-                Err(e) => {
-                    writeln!(stderr, "{}", e).unwrap();
-                    return;
-                }
-            };
+            let doc = get_or_fail!(doc_result, stderr, args.flag_debug);
+            
+            if let Some(val) = doc.get("$err") {
+                fail!(stderr, format!("got error {}", val), true);
+            }
 
             let string = format!("{}", doc);
             println!("{}", colorize(string));
