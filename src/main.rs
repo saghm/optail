@@ -5,6 +5,9 @@ extern crate docopt;
 extern crate mongodb;
 extern crate rustc_serialize;
 
+#[macro_use]
+mod macros;
+
 use std::io::{self, Write};
 use std::thread;
 use std::time::Duration;
@@ -13,8 +16,10 @@ use bson::Bson;
 use colored::*;
 use docopt::Docopt;
 use mongodb::{Client, ThreadedClient};
-use mongodb::db::ThreadedDatabase;
 use mongodb::coll::options::{FindOptions, CursorType};
+use mongodb::cursor::Cursor;
+use mongodb::db::ThreadedDatabase;
+use mongodb::error::Error as MongoError;
 
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
@@ -48,21 +53,64 @@ fn colorize(input: String) -> String {
     input.replace("{", &open_br).replace("}", &close_br).replace(":", &colon)
 }
 
-macro_rules! fail {
-    ($out:expr, $err:expr, $debug:expr) => {{
-        if $debug {
-            writeln!($out, "{}: {}", "optail error".red(), $err).unwrap();
-        }
+fn get_timestamp(client: Client) -> Result<Bson, MongoError> {
+    let db = client.db("local");
+    let oplog = db.collection("oplog.rs");
 
-        return;
-    }}
+    let mut options = FindOptions::new();
+    options.sort = Some(doc! { "ts" => (-1) });
+
+    match oplog.find_one(None, Some(options)) {
+        Ok(Some(ref last_entry)) if last_entry.contains_key("ts") => {
+            Ok(last_entry.get("ts").unwrap().clone())
+        }
+        Ok(_) => Ok(Bson::I32(0)),
+        Err(e) => Err(e),
+    }
 }
 
-macro_rules! get_or_fail {
-    ($exp:expr, $out:expr, $debug:expr) => { match $exp {
-        Ok(val) => val,
-        Err(e) => fail!($out, e, $debug),
-    }}
+fn run_loop(mut cursor: Cursor, debug: bool) {
+    let mut stderr = io::stderr();
+
+    let second = Duration::from_secs(1);
+
+    loop {
+        while let Some(doc_result) = cursor.next() {
+            let doc = get_or_fail!(doc_result, stderr, debug);
+
+            if let Some(val) = doc.get("$err") {
+                fail!(stderr, format!("got error {}", val), true);
+            }
+
+            let string = format!("{}", doc);
+            println!("{}", colorize(string));
+        }
+
+        thread::sleep(second);
+    }
+}
+
+fn tail_oplog(host: &str, port: u16, debug: bool) {
+    let mut stderr = io::stderr();
+
+    let client = get_or_fail!(Client::connect(host, port), stderr, debug);
+    let db = client.db("local");
+    let oplog = db.collection("oplog.rs");
+
+    let timestamp = get_or_fail!(get_timestamp(client), stderr, debug);
+
+    let mut options = FindOptions::new();
+    options.cursor_type = CursorType::TailableAwait;
+    options.no_cursor_timeout = true;
+    options.op_log_replay = true;
+
+    let filter = doc! {
+        "ts" => { "$gt" => timestamp }
+    };
+
+    let cursor = get_or_fail!(oplog.find(Some(filter), Some(options)), stderr, debug);
+
+    run_loop(cursor, debug)
 }
 
 fn main() {
@@ -75,53 +123,5 @@ fn main() {
         return;
     }
 
-    let mut stderr = io::stderr();
-
-    let client = get_or_fail!(Client::connect(&args.flag_host, args.flag_port),
-                              stderr,
-                              args.flag_debug);
-
-    let second = Duration::from_secs(1);
-
-    let db = client.db("local");
-    let oplog = db.collection("oplog.rs");
-
-    let mut options = FindOptions::new();
-    options.sort = Some(doc! { "ts" => (-1) });
-
-    let timestamp = match oplog.find_one(None, Some(options)) {
-        Ok(Some(ref last_entry)) if last_entry.contains_key("ts") => {
-            last_entry.get("ts").unwrap().clone()
-        }
-        Ok(_) => Bson::I32(0),
-        Err(e) => fail!(stderr, e, args.flag_debug),
-    };
-
-    let mut options = FindOptions::new();
-    options.cursor_type = CursorType::TailableAwait;
-    options.no_cursor_timeout = true;
-    options.op_log_replay = true;
-
-    let filter = doc! {
-        "ts" => { "$gt" => timestamp }
-    };
-
-    let mut cursor = get_or_fail!(oplog.find(Some(filter), Some(options)),
-                                  stderr,
-                                  args.flag_debug);
-
-    loop {
-        while let Some(doc_result) = cursor.next() {
-            let doc = get_or_fail!(doc_result, stderr, args.flag_debug);
-
-            if let Some(val) = doc.get("$err") {
-                fail!(stderr, format!("got error {}", val), true);
-            }
-
-            let string = format!("{}", doc);
-            println!("{}", colorize(string));
-        }
-
-        thread::sleep(second);
-    }
+    tail_oplog(&args.flag_host, args.flag_port, args.flag_debug)
 }
