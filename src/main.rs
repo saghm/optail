@@ -106,12 +106,14 @@ fn main() {
         "ts" => { "$gt" => timestamp }
     };
 
-    let mut cursor = get_or_fail!(oplog.find(Some(filter), Some(options)), stderr, args.flag_debug);
-   
+    let mut cursor = get_or_fail!(oplog.find(Some(filter), Some(options)),
+                                  stderr,
+                                  args.flag_debug);
+
     loop {
         while let Some(doc_result) = cursor.next() {
             let doc = get_or_fail!(doc_result, stderr, args.flag_debug);
-            
+
             if let Some(val) = doc.get("$err") {
                 fail!(stderr, format!("got error {}", val), true);
             }
